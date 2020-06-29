@@ -1,2 +1,2 @@
 # Rosbag_modifier
-A script which splits one rosbag file on parts
+A script which splits one rosbag file into few parts

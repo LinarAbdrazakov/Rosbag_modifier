@@ -20,10 +20,25 @@ parser = argparse.ArgumentParser(description='Rosbag splitter')
 parser.add_argument('-i', action='store', dest='input_rosbag', default='/media/psf/Home/Desktop/bags/map2.bag')
 parser.add_argument('-n', action='store', dest='n_output_bags', type=int, default=2)
 parser.add_argument('-o', action='store', dest='result_directory', default='result')
-parser.add_argument('-odom_topic', action='store', dest='odom_topic', default=None)
+parser.add_argument('-odom_topic', action='store', dest='odom_topic', default="/base_controller/odom")
 
 
 args = parser.parse_args()
+
+
+def reset_base_footprint(msg, frame_id, child_frame_id):
+	for i in range(len(msg.transforms)):
+		if msg.transforms[i].header.frame_id == frame_id and msg.transforms[i].child_frame_id == child_frame_id:
+			msg.transforms[i].transform.translation.x = 0
+			msg.transforms[i].transform.translation.y = 0
+			msg.transforms[i].transform.translation.z = 0
+
+			msg.transforms[i].transform.rotation.x = 0
+			msg.transforms[i].transform.rotation.y = 0
+			msg.transforms[i].transform.rotation.z = 0
+			msg.transforms[i].transform.rotation.w = 1
+			break
+
 
 input_rosbag_name = args.input_rosbag #'/media/psf/Home/Desktop/bags/map2.bag'
 input_bag = rosbag.Bag(input_rosbag_name)
@@ -59,6 +74,9 @@ for topic, msg, t in tqdm.tqdm(input_bag.read_messages()):
 	if update_base_odom and (args.odom_topic is not None) and (topic == args.odom_topic):
 		base_odom = copy.deepcopy(msg.pose.pose)
 		update_base_odom = False
+
+	if topic == "tf":
+		reset_base_footprint(msg, "/odom", "/base_footprint")
 
 	if (args.odom_topic is not None) and (topic == args.odom_topic):
 		msg.pose.pose.position.x -= base_odom.position.x;

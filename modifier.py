@@ -20,7 +20,8 @@ parser = argparse.ArgumentParser(description='Rosbag splitter')
 parser.add_argument('-i', action='store', dest='input_rosbag', default='/media/psf/Home/Desktop/bags/map2.bag')
 parser.add_argument('-n', action='store', dest='n_output_bags', type=int, default=2)
 parser.add_argument('-o', action='store', dest='result_directory', default='result')
-parser.add_argument('-r', action='store', dest='reset_to_zero_odom', type=bool, default=True)
+parser.add_argument('-odom_topic', action='store', dest='odom_topic', default=None)
+
 
 args = parser.parse_args()
 
@@ -55,11 +56,11 @@ for topic, msg, t in tqdm.tqdm(input_bag.read_messages()):
 		new_start_t += new_duration_t
 		i_bag += 1
 
-	if update_base_odom and topic == '/base_controller/odom':
+	if update_base_odom and (args.odom_topic is not None) and (topic == args.odom_topic):
 		base_odom = copy.deepcopy(msg.pose.pose)
 		update_base_odom = False
 
-	if args.reset_to_zero_odom and topic == '/base_controller/odom':
+	if (args.odom_topic is not None) and (topic == args.odom_topic):
 		msg.pose.pose.position.x -= base_odom.position.x;
 		msg.pose.pose.position.y -= base_odom.position.y;
 		msg.pose.pose.position.z -= base_odom.position.z;

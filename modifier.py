@@ -15,29 +15,30 @@ import tqdm
 import copy
 
 
+TIME_GAP = 0
+
+def inv(transform):
+    "Invert rigid body transformation matrix"
+    R = transform[0:3, 0:3]
+    t = transform[0:3, 3]
+    t_inv = -1 * R.T.dot(t)
+    transform_inv = np.eye(4)
+    transform_inv[0:3, 0:3] = R.T
+    transform_inv[0:3, 3] = t_inv
+    return transform_inv
+
+
+def get_time(msg):
+	return msg.header.stamp.secs * 10**9 + msg.header.stamp.nsecs
+
+
 parser = argparse.ArgumentParser(description='Rosbag splitter')
 
 parser.add_argument('-i', action='store', dest='input_rosbag', default='/media/psf/Home/Desktop/bags/map2.bag')
 parser.add_argument('-n', action='store', dest='n_output_bags', type=int, default=2)
 parser.add_argument('-o', action='store', dest='result_directory', default='result')
-parser.add_argument('-odom_topic', action='store', dest='odom_topic', default="/base_controller/odom")
-
 
 args = parser.parse_args()
-
-
-def reset_base_footprint(msg, frame_id, child_frame_id):
-	for i in range(len(msg.transforms)):
-		if msg.transforms[i].header.frame_id == frame_id and msg.transforms[i].child_frame_id == child_frame_id:
-			msg.transforms[i].transform.translation.x = 0
-			msg.transforms[i].transform.translation.y = 0
-			msg.transforms[i].transform.translation.z = 0
-
-			msg.transforms[i].transform.rotation.x = 0
-			msg.transforms[i].transform.rotation.y = 0
-			msg.transforms[i].transform.rotation.z = 0
-			msg.transforms[i].transform.rotation.w = 1
-			break
 
 
 input_rosbag_name = args.input_rosbag #'/media/psf/Home/Desktop/bags/map2.bag'
@@ -59,51 +60,125 @@ for s in range(args.n_output_bags):
 	output_bags.append(rosbag.Bag(result_bagname, 'w'))
 
 
+# topics
+
+#odom_topic = ["/base_controller/odom"]
+#tf_topic   = ["tf"]
+#other_topics = ["base_scan", "data_throttled_camera_info", "data_throttled_image/compressed", "data_throttled_image_depth/compressedDepth"]
+
+odom_topic = ["/az3/base_controller/odom"]
+tf_topic   = ["/tf"]
+other_topics = ["/jn0/base_scan", "data_throttled_camera_info", "data_throttled_image/compressed", "data_throttled_image_depth/compressedDepth"]
+
+# ---------------- write odometry msgs ------------------
 i_bag = 0
 new_start_t = start_t
 
 base_odom = Pose()
 update_base_odom = True
 
-for topic, msg, t in tqdm.tqdm(input_bag.read_messages()):
+odometry_buffer = {}
+
+for topic, msg, t in tqdm.tqdm(input_bag.read_messages(topics=odom_topic)):
 	if t > new_start_t + new_duration_t and i_bag + 1 < args.n_output_bags:
 		update_base_odom = True
 		new_start_t += new_duration_t
 		i_bag += 1
 
-	if update_base_odom and (args.odom_topic is not None) and (topic == args.odom_topic):
+	if update_base_odom:
 		base_odom = copy.deepcopy(msg.pose.pose)
+
+		footprint_q = (base_odom.orientation.x,
+				       base_odom.orientation.y,
+				       base_odom.orientation.z,
+			    	   base_odom.orientation.w)
+		footprint_orientation = tf.transformations.quaternion_matrix(footprint_q)
+
+		footprint_orientation[0, 3] = base_odom.position.x
+		footprint_orientation[1, 3] = base_odom.position.y
+		footprint_orientation[2, 3] = base_odom.position.z
+
 		update_base_odom = False
 
-	if topic == "tf":
-		reset_base_footprint(msg, "/odom", "/base_footprint")
 
-	if (args.odom_topic is not None) and (topic == args.odom_topic):
-		msg.pose.pose.position.x -= base_odom.position.x;
-		msg.pose.pose.position.y -= base_odom.position.y;
-		msg.pose.pose.position.z -= base_odom.position.z;
+	q = (msg.pose.pose.orientation.x,
+		 msg.pose.pose.orientation.y,
+		 msg.pose.pose.orientation.z,
+	     msg.pose.pose.orientation.w)
+	orientation = tf.transformations.quaternion_matrix(q)
 
-		q = (msg.pose.pose.orientation.x,
-			 msg.pose.pose.orientation.y,
-			 msg.pose.pose.orientation.z,
-		     msg.pose.pose.orientation.w)
-		rot = tf.transformations.quaternion_matrix(q)
+	orientation[0, 3] = msg.pose.pose.position.x
+	orientation[1, 3] = msg.pose.pose.position.y
+	orientation[2, 3] = msg.pose.pose.position.z
 
-		q_base_inv = (base_odom.orientation.x,
-				      base_odom.orientation.y,
-				      base_odom.orientation.z,
-				      - base_odom.orientation.w)
-		rot_base_inv = tf.transformations.quaternion_matrix(q_base_inv)
 
-		rot = np.dot(rot, rot_base_inv)
-		odom_quat = tf.transformations.quaternion_from_matrix(rot)
+	new_orientation = np.dot(inv(footprint_orientation), orientation)
 
-		msg.pose.pose.orientation.x = odom_quat[0]
-		msg.pose.pose.orientation.y = odom_quat[1]
-		msg.pose.pose.orientation.z = odom_quat[2]
-		msg.pose.pose.orientation.w = odom_quat[3]
+	msg.pose.pose.position.x = new_orientation[0, 3]
+	msg.pose.pose.position.y = new_orientation[1, 3]
+	msg.pose.pose.position.z = new_orientation[2, 3]
+
+	odom_quat = tf.transformations.quaternion_from_matrix(new_orientation)
+	msg.pose.pose.orientation.x = odom_quat[0]
+	msg.pose.pose.orientation.y = odom_quat[1]
+	msg.pose.pose.orientation.z = odom_quat[2]
+	msg.pose.pose.orientation.w = odom_quat[3]
+
+	odometry_buffer[get_time(msg)] = copy.deepcopy(msg.pose.pose) # save new odometry in buffer for tf topic
+
+	msg.header.stamp.secs += i_bag * TIME_GAP
+	t += rospy.Duration.from_sec(i_bag * TIME_GAP)
 
 	output_bags[i_bag].write(topic, msg, t)
+
+
+# ------------------- write tf msgs ---------------------
+i_bag = 0
+new_start_t = start_t
+
+for topic, msg, t in tqdm.tqdm(input_bag.read_messages(topics=tf_topic)):
+	if t > new_start_t + new_duration_t and i_bag + 1 < args.n_output_bags:
+		update_base_odom = True
+		new_start_t += new_duration_t
+		i_bag += 1
+
+	for i in range(len(msg.transforms)):
+		if msg.transforms[i].header.frame_id == "/odom" and msg.transforms[i].child_frame_id == "/base_footprint":
+			if get_time(msg.transforms[i]) in odometry_buffer:
+
+				odom = odometry_buffer[get_time(msg.transforms[i])]
+
+				msg.transforms[i].transform.translation.x = odom.position.x
+				msg.transforms[i].transform.translation.y = odom.position.y
+				msg.transforms[i].transform.translation.z = odom.position.z
+
+				msg.transforms[i].transform.rotation.x = odom.orientation.x
+				msg.transforms[i].transform.rotation.y = odom.orientation.y
+				msg.transforms[i].transform.rotation.z = odom.orientation.z
+				msg.transforms[i].transform.rotation.w = odom.orientation.w
+
+		msg.transforms[i].header.stamp.secs += i_bag * TIME_GAP
+
+	t += rospy.Duration.from_sec(i_bag * TIME_GAP)
+
+	output_bags[i_bag].write(topic, msg, t)
+
+
+# ----------------- write others msgs -------------------
+i_bag = 0
+new_start_t = start_t
+
+for topic, msg, t in tqdm.tqdm(input_bag.read_messages(topics=other_topics)):
+	if t > new_start_t + new_duration_t and i_bag + 1 < args.n_output_bags:
+		update_base_odom = True
+		new_start_t += new_duration_t
+		i_bag += 1
+
+	msg.header.stamp.secs += i_bag * TIME_GAP
+	t += rospy.Duration.from_sec(i_bag * TIME_GAP)
+
+	output_bags[i_bag].write(topic, msg, t)
+
 
 
 input_bag.close()
